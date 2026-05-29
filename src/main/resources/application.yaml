@@ -1,0 +1,28 @@
+spring:
+  application:
+    name: wecom-app
+  datasource:
+    url: jdbc:mysql://localhost:3306/university_db?useSSL=false&serverTimezone=UTC&createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true
+    username: root
+    password:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # HikariCP 连接池配置
+    hikari:
+      connection-timeout: 5000
+      idle-timeout: 60000
+      maximum-pool-size: 10
+      minimum-idle: 5
+
+server:
+  # 使用 9090 端口避免与其他服务冲突
+  port: 9090
+
+wecom:
+  token: O8KnDhzVedV8lewnQTiage
+  corp-id: ww6e097b21b3a7065e
+  corp-secret: KpGkpXcVu4R3Mo9yEgSik4F4jjJyQbGLrM0HmvaD3xI
+  encoding-aes-key: LRaaGeqYjCu4bdw1739ybslw8liK3op9qkpjIGjX15b
+  get-token-url: https://qyapi.weixin.qq.com/cgi-bin/gettoken
+  sync-msg-url: https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg
+  send-msg-url: https://qyapi.weixin.qq.com/cgi-bin/kf/send_msg
+
