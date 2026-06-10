@@ -42,15 +42,17 @@ public class SessionStateService {
      * @return 会话状态响应
      */
     public GetSessionStateResponse getSessionState(String openKfid, String externalUserid) {
-        System.out.println("获取会话状态 - openKfid: " + openKfid + ", externalUserid: " + externalUserid);
+        System.out.println("\n---------- 获取会话状态 ----------");
+        System.out.println("  openKfid: " + openKfid);
+        System.out.println("  externalUserid: " + externalUserid);
 
         GetSessionStateResponse response = wecomApiClient.getSessionState(openKfid, externalUserid);
 
-        System.out.println("获取会话状态结果：");
-        System.out.println("  errcode: " + response.getErrcode());
-        System.out.println("  errmsg: " + response.getErrmsg());
-        System.out.println("  service_state: " + response.getService_state() + " (" + response.getServiceStateDesc() + ")");
-        System.out.println("  servicer_userid: " + response.getServicer_userid());
+        System.out.println("  结果:");
+        System.out.println("    errcode: " + response.getErrcode());
+        System.out.println("    errmsg: " + response.getErrmsg());
+        System.out.println("    service_state: " + response.getService_state() + " (" + response.getServiceStateDesc() + ")");
+        System.out.println("    servicer_userid: " + response.getServicer_userid());
 
         return response;
     }
@@ -66,17 +68,21 @@ public class SessionStateService {
      */
     public TransSessionStateResponse transSessionState(String openKfid, String externalUserid,
                                                         Integer serviceState, String servicerUserid) {
-        System.out.println("变更会话状态 - openKfid: " + openKfid + ", externalUserid: " + externalUserid);
+        System.out.println("\n---------- 变更会话状态 ----------");
+        System.out.println("  openKfid: " + openKfid);
+        System.out.println("  externalUserid: " + externalUserid);
         System.out.println("  目标状态: " + serviceState + " (" + WecomConstants.ServiceState.getDesc(serviceState) + ")");
-        System.out.println("  接待人员: " + servicerUserid);
+        System.out.println("  接待人员: " + (servicerUserid != null ? servicerUserid : "（不指定）"));
 
         SessionStateRequest request = new SessionStateRequest(openKfid, externalUserid, serviceState, servicerUserid);
         TransSessionStateResponse response = wecomApiClient.transSessionState(request);
 
-        System.out.println("变更会话状态结果：");
-        System.out.println("  errcode: " + response.getErrcode());
-        System.out.println("  errmsg: " + response.getErrmsg());
-        System.out.println("  msg_code: " + response.getMsg_code());
+        System.out.println("  变更结果:");
+        System.out.println("    errcode: " + response.getErrcode());
+        System.out.println("    errmsg: " + response.getErrmsg());
+        if (response.getMsg_code() != null && !response.getMsg_code().isEmpty()) {
+            System.out.println("    msg_code: " + response.getMsg_code());
+        }
 
         return response;
     }

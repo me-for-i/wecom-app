@@ -85,6 +85,8 @@ public class AccessTokenService {
      * @throws RuntimeException 获取失败时抛出异常
      */
     private String fetchAccessToken() {
+        System.out.println("\n========== [AccessToken] 刷新 token ==========");
+
         String url = properties.getGetTokenUrl()
                 + "?corpid=" + properties.getCorpId()
                 + "&corpsecret=" + properties.getCorpSecret();
@@ -99,6 +101,7 @@ public class AccessTokenService {
         int errcode = jsonResponse.optInt("errcode", 0);
         if (errcode != 0) {
             String errmsg = jsonResponse.optString("errmsg", "Unknown error");
+            System.err.println("  [失败] errcode: " + errcode + ", errmsg: " + errmsg);
             throw new RuntimeException("Failed to get access_token: " + errmsg + " (errcode: " + errcode + ")");
         }
 
@@ -108,7 +111,7 @@ public class AccessTokenService {
         // 提前 5 分钟过期，避免边界情况
         expireTime = Instant.now().plusSeconds(expiresIn - 300);
 
-        System.out.println("Access token refreshed, expires in " + expiresIn + " seconds");
+        System.out.println("  [成功] expires_in: " + expiresIn + "s, token: " + cachedAccessToken.substring(0, 10) + "...");
 
         return cachedAccessToken;
     }

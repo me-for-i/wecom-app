@@ -42,7 +42,7 @@ public class CallbackController {
      * @param timestamp     时间戳
      * @param nonce         随机数
      * @param req_body      加密的消息体
-     * @return 固定返回 "hello" 字符串
+     * @return 固定返回 "" 字符串
      * @throws AesException 解密失败时抛出异常
      */
     @PostMapping("/")
@@ -52,6 +52,6 @@ public class CallbackController {
                                  @RequestBody String req_body) throws AesException {
 
         messageService.handleMessage(msg_signature, timestamp, nonce, req_body);
-        return "hello";
+        return "";
     }
 }

@@ -62,17 +62,18 @@ public class CallbackDecryptService {
         }
 
         // 2. 解密消息
+        System.out.println("\n========== [回调解密] 开始解密 ==========");
         String decryptedXml = wxcpt.DecryptMsg(msgSignature, timestamp, nonce, lowerCaseJson.toString());
 
-        System.out.println("========== 新的消息 ==========");
-        System.out.println("解密明文：" + decryptedXml);
+        System.out.println("解密后明文 XML: " + decryptedXml);
 
         // 3. 解析解密后的 XML，提取字段
+        System.out.println("---------- [回调解密] 提取字段 ----------");
         JSONObject decryptedJson = XML.toJSONObject(decryptedXml).optJSONObject("xml");
         String openKfid = decryptedJson.optString("OpenKfId", "");
         String token = decryptedJson.optString("Token", "");
-        System.out.println("OpenKfId：" + openKfid);
-        System.out.println("Token：" + token);
+        System.out.println("  OpenKfId: " + openKfid);
+        System.out.println("  Token: " + token);
 
         // 4. 构造回调消息对象
         CallbackMessage message = new CallbackMessage();

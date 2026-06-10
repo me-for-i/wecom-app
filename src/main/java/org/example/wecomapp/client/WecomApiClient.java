@@ -55,6 +55,10 @@ public class WecomApiClient {
      * @see SyncMsgResponse
      */
     public SyncMsgResponse syncMsg(String token, String openKfid, String cursor, int limit) {
+        System.out.println("\n========== [企业微信 API] sync_msg ==========");
+        System.out.println("  cursor: " + (cursor != null && !cursor.isEmpty() ? cursor : "首次拉取"));
+        System.out.println("  limit: " + limit);
+
         JSONObject body = new JSONObject();
         body.put("token", token);
         body.put("open_kfid", openKfid);
@@ -207,6 +211,10 @@ public class WecomApiClient {
      * @see SendMsgResponse
      */
     public SendMsgResponse sendMsg(String touser, String openKfid, String msgtype, JSONObject content) {
+        System.out.println("\n========== [企业微信 API] send_msg ==========");
+        System.out.println("  touser: " + touser);
+        System.out.println("  msgtype: " + msgtype);
+
         JSONObject body = new JSONObject();
         body.put("touser", touser);
         body.put("open_kfid", openKfid);
@@ -229,6 +237,11 @@ public class WecomApiClient {
         result.setErrmsg(json.optString("errmsg", ""));
         result.setMsgid(json.optString("msgid", ""));
 
+        System.out.println("  结果: errcode=" + result.getErrcode() + ", errmsg=" + result.getErrmsg());
+        if (result.getMsgid() != null && !result.getMsgid().isEmpty()) {
+            System.out.println("        msgid=" + result.getMsgid());
+        }
+
         return result;
     }
 
@@ -245,6 +258,10 @@ public class WecomApiClient {
      * @see GetSessionStateResponse
      */
     public GetSessionStateResponse getSessionState(String openKfid, String externalUserid) {
+        System.out.println("\n========== [企业微信 API] service_state/get ==========");
+        System.out.println("  openKfid: " + openKfid);
+        System.out.println("  externalUserid: " + externalUserid);
+
         JSONObject body = new JSONObject();
         body.put("open_kfid", openKfid);
         body.put("external_userid", externalUserid);
@@ -279,6 +296,11 @@ public class WecomApiClient {
      * @see TransSessionStateResponse
      */
     public TransSessionStateResponse transSessionState(SessionStateRequest request) {
+        System.out.println("\n========== [企业微信 API] service_state/trans ==========");
+        System.out.println("  openKfid: " + request.getOpen_kfid());
+        System.out.println("  externalUserid: " + request.getExternal_userid());
+        System.out.println("  目标状态: " + request.getService_state());
+
         JSONObject body = new JSONObject();
         body.put("open_kfid", request.getOpen_kfid());
         body.put("external_userid", request.getExternal_userid());
@@ -298,6 +320,8 @@ public class WecomApiClient {
         result.setErrcode(json.optInt("errcode", -1));
         result.setErrmsg(json.optString("errmsg", ""));
         result.setMsg_code(json.optString("msg_code", ""));
+
+        System.out.println("  结果: errcode=" + result.getErrcode() + ", errmsg=" + result.getErrmsg());
 
         return result;
     }

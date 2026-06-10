@@ -10,8 +10,10 @@ import org.example.wecomapp.dto.SendMsgResponse;
 import org.example.wecomapp.dto.SyncMsgResponse;
 import org.example.wecomapp.util.wx.mp.aes.AesException;
 import org.json.JSONObject;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -35,6 +37,7 @@ public class MessageService {
     private final CallbackDecryptService callbackDecryptService;
     private final WecomApiClient wecomApiClient;
     private final DifyApiClient difyApiClient;
+    private final DifyConversationService difyConversationService;
     private final MessageContentBuilder messageContentBuilder;
     private final SessionStateService sessionStateService;
 
@@ -56,11 +59,13 @@ public class MessageService {
     public MessageService(CallbackDecryptService callbackDecryptService,
                           WecomApiClient wecomApiClient,
                           DifyApiClient difyApiClient,
+                          DifyConversationService difyConversationService,
                           MessageContentBuilder messageContentBuilder,
                           SessionStateService sessionStateService) {
         this.callbackDecryptService = callbackDecryptService;
         this.wecomApiClient = wecomApiClient;
         this.difyApiClient = difyApiClient;
+        this.difyConversationService = difyConversationService;
         this.messageContentBuilder = messageContentBuilder;
         this.sessionStateService = sessionStateService;
     }
@@ -82,13 +87,16 @@ public class MessageService {
      * @param reqBody      请求体 XML
      * @throws AesException 解密失败时抛出异常
      */
+    @Async
     public void handleMessage(String msgSignature, String timestamp, String nonce, String reqBody) throws AesException {
-        // 1. 解密回调消息
+        // ==================== 步骤 1: 解密回调消息 ====================
+        System.out.println("\n========== 步骤 1: 解密回调消息 ==========");
         CallbackMessage callbackMessage = callbackDecryptService.decrypt(msgSignature, timestamp, nonce, reqBody);
         String openKfid = callbackMessage.getOpenKfid();
         String token = callbackMessage.getToken();
 
-        // 2. 检查消息是否已经处理过（企业微信会重试发送未响应的消息）
+        // ==================== 步骤 2: 消息去重 ====================
+        System.out.println("========== 步骤 2: 消息去重 ==========");
         if (processedTokens.contains(token)) {
             System.out.println("消息已处理过，跳过重复处理。Token: " + token);
             new JSONObject("{\"errcode\":0,\"errmsg\":\"ok\"}");
@@ -96,37 +104,68 @@ public class MessageService {
         }
         processedTokens.add(token);
 
-        // 3. 调用 sync_msg 接口
-        SyncMsgResponse syncResult = wecomApiClient.syncMsg(token, openKfid, null, 1000);
-        logSyncResult(syncResult);
+        // ==================== 步骤 3: 拉取消息列表 ====================
+        System.out.println("========== 步骤 3: 拉取消息列表（分页） ==========");
+        List<SyncMsgResponse.MsgItem> allMessages = new ArrayList<>();
+        String cursor = null;
 
-        // 3. 从 msg_list 中找到用户发送的最后一条消息 (origin=3, 微信客户发送)
-        SyncMsgResponse.MsgItem lastUserMsg = findLastUserMessage(syncResult.getMsg_list());
-        System.out.println("最终用户消息：" + lastUserMsg);
+        // 分页拉取所有消息
+        do {
+            SyncMsgResponse syncResult = wecomApiClient.syncMsg(token, openKfid, cursor, 1000);
+            logSyncResult(syncResult);
 
-        // 4. 如果找到用户消息，获取会话状态并打印结果，然后原样返回给用户
+            // 收集消息
+            if (syncResult.getMsg_list() != null) {
+                allMessages.addAll(syncResult.getMsg_list());
+            }
+
+            // 如果还有更多消息，继续拉取
+            if (syncResult.getHas_more() != null && syncResult.getHas_more() == 1) {
+                cursor = syncResult.getNext_cursor();
+                System.out.println("---------- 还有更多消息，继续拉取，cursor: " + cursor);
+            } else {
+                break;
+            }
+        } while (cursor != null && !cursor.isEmpty());
+
+        System.out.println("拉取完成，共 " + allMessages.size() + " 条消息");
+
+        // ==================== 步骤 4: 查找用户最后一条消息 ====================
+        System.out.println("========== 步骤 4: 查找用户最后一条消息 ==========");
+        SyncMsgResponse.MsgItem lastUserMsg = findLastUserMessage(allMessages);
+        if (lastUserMsg != null) {
+            System.out.println("最终用户消息 msgid: " + lastUserMsg.getMsgid() + ", msgtype: " + lastUserMsg.getMsgtype());
+        } else {
+            System.out.println("未找到用户发送的消息");
+        }
+
+        // ==================== 步骤 5: 会话状态管理 ====================
         if (lastUserMsg != null) {
             String externalUserid = lastUserMsg.getExternal_userid();
+            System.out.println("========== 步骤 5: 会话状态管理 ==========");
 
-            // 获取会话状态并打印结果
+            // 获取会话状态
             GetSessionStateResponse sessionState = sessionStateService.getSessionState(openKfid, externalUserid);
-            System.out.println("========== 会话状态 ==========");
-            System.out.println("service_state: " + sessionState.getService_state() + " (" + sessionState.getServiceStateDesc() + ")");
-            System.out.println("servicer_userid: " + sessionState.getServicer_userid());
-            System.out.println("==============================");
+            System.out.println("---------- 当前会话状态 ----------");
+            System.out.println("  service_state: " + sessionState.getService_state() + " (" + sessionState.getServiceStateDesc() + ")");
+            System.out.println("  servicer_userid: " + sessionState.getServicer_userid());
+            System.out.println("---------------------------------");
 
             // 如果会话状态不是由智能助手接待，则变更为由智能助手接待
             if (sessionState.getService_state() != WecomConstants.ServiceState.BOT_SERVICE) {
-                System.out.println("会话状态不是由智能助手接待，正在变更...");
+                System.out.println("--> 非智能助手接待状态，正在变更为智能助手接待...");
                 sessionStateService.transferToBotService(openKfid, externalUserid);
-                System.out.println("已变更为由智能助手接待");
+                System.out.println("--> 已变更为由智能助手接待");
+            } else {
+                System.out.println("--> 已是智能助手接待状态，无需变更");
             }
 
+            // ==================== 步骤 6: 发送回复消息 ====================
+            System.out.println("========== 步骤 6: 发送回复消息 ==========");
             sendReplyMessage(lastUserMsg, openKfid);
+            System.out.println("============================================\n");
             return;
         }
-
-        new JSONObject(syncResult.toString());
     }
 
     /**
@@ -198,35 +237,47 @@ public class MessageService {
         String msgtype = lastUserMsg.getMsgtype();
         String externalUserid = lastUserMsg.getExternal_userid();
 
-        // 对于文本消息，调用 Dify API 获取 AI 回答
         if ("text".equals(msgtype) && lastUserMsg.getText() != null) {
+            // ==================== 文本消息：调用 Dify AI ====================
+            System.out.println("---------- [文本消息] 调用 Dify AI ----------");
             String userQuery = lastUserMsg.getText().getContent();
-            System.out.println("用户消息内容：" + userQuery);
-            System.out.println("准备调用 Dify API...");
+            System.out.println("用户消息：" + userQuery);
+
+            // 获取该用户的会话ID（用于继续对话）
+            String conversationId = difyConversationService.getConversationId(externalUserid);
+            System.out.println("会话ID：" + (conversationId != null ? conversationId : "新会话"));
 
             // 调用 Dify API
-            DifyChatResponse difyResponse = difyApiClient.chatMessage(userQuery, externalUserid);
+            DifyChatResponse difyResponse = difyApiClient.chatMessage(userQuery, externalUserid, conversationId);
             String aiAnswer = difyResponse.getAnswer();
-            System.out.println("Dify AI 回答：" + aiAnswer);
+            System.out.println("AI 回答：" + aiAnswer);
 
-            // 构造文本回复消息
+            // 缓存新的会话ID
+            if (difyResponse.getConversationId() != null && !difyResponse.getConversationId().isEmpty()) {
+                difyConversationService.saveConversationId(externalUserid, difyResponse.getConversationId());
+                System.out.println("会话ID已缓存: " + difyResponse.getConversationId());
+            }
+
+            // -------------------- 构造并发送回复 --------------------
+            System.out.println("---------- 构造并发送文本回复 ----------");
             JSONObject textContent = new JSONObject();
             textContent.put("content", aiAnswer);
             JSONObject sendContent = new JSONObject();
             sendContent.put("msgtype", "text");
             sendContent.put("text", textContent);
 
-            // 发送 AI 回答给用户
             SendMsgResponse sendResult = wecomApiClient.sendMsg(externalUserid, openKfid, "text", textContent);
-            System.out.println("发送 AI 回答结果：" + sendResult);
+            System.out.println("发送结果：" + sendResult.getErrcode() + " - " + sendResult.getErrmsg());
         } else {
-            // 非文本消息原样返回
+            // ==================== 非文本消息：原样转发 ====================
+            System.out.println("---------- [非文本消息] 原样转发 ----------");
+            System.out.println("消息类型: " + msgtype);
             JSONObject sendContent = messageContentBuilder.build(lastUserMsg, msgtype);
-            System.out.println("准备构造回复消息：" + sendContent);
             if (sendContent != null) {
-                System.out.println("准备发送消息给用户：" + externalUserid);
                 SendMsgResponse sendResult = wecomApiClient.sendMsg(externalUserid, openKfid, msgtype, sendContent);
-                System.out.println("发送消息结果：" + sendResult);
+                System.out.println("转发结果：" + sendResult.getErrcode() + " - " + sendResult.getErrmsg());
+            } else {
+                System.out.println("不支持的消息类型，跳过回复");
             }
         }
     }
