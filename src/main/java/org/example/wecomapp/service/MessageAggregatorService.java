@@ -11,31 +11,27 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 
 /**
  * 消息聚合与防抖服务
  *
- * <p>解决三个核心问题：</p>
+ * <p>按 external_userid 维护独立的消息队列，解决：</p>
  * <ol>
- *   <li>竞态条件 — 多个 @Async 回调并发处理同一批消息导致重复回复</li>
- *   <li>只处理最后一条 — 前面的消息被丢弃</li>
- *   <li>图文脱节 — 图片和后续文字问句无法关联</li>
+ *   <li>多用户消息混杂 — sync_msg 返回客服帐号下所有用户的消息，需按用户分组</li>
+ *   <li>增量过滤 — 按每用户的 lastMsgId 过滤已处理消息</li>
+ *   <li>全局 cursor — 增量拉取新消息，避免重复获取</li>
+ *   <li>防抖 — 每用户独立的 3 秒防抖窗口，聚合快速连发消息</li>
+ *   <li>图文混排 — 同一用户发送的图片+文字合并处理</li>
  * </ol>
- *
- * <p>核心机制：防抖 + 消息聚合 + 已处理追踪</p>
- * <ul>
- *   <li>每次回调触发时拉取新消息放入缓冲区，启动/重置 3 秒定时器</li>
- *   <li>定时器触发后分析缓冲区内所有消息的组合，一次性处理</li>
- *   <li>图片+文字 → 上传图片，文字作为 query，附带图片文件 ID</li>
- * </ul>
  *
  * @author dixonyen
  */
 @Service
 public class MessageAggregatorService {
 
-    private static final long DEBOUNCE_MS = 3000; // 防抖窗口 3 秒
+    private static final long DEBOUNCE_MS = 3000;
 
     private final WecomApiClient wecomApiClient;
     private final DifyApiClient difyApiClient;
@@ -44,15 +40,26 @@ public class MessageAggregatorService {
     private final SessionStateService sessionStateService;
 
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
-    private final ConcurrentHashMap<String, PendingConversation> pending = new ConcurrentHashMap<>();
 
     /**
-     * 待处理的会话上下文
+     * 按 openKfid 维护的全局状态
      */
-    static class PendingConversation {
-        String token;
-        String openKfid;
-        String externalUserid;
+    private final ConcurrentHashMap<String, OpenKfidState> openKfidStates = new ConcurrentHashMap<>();
+
+    /**
+     * 客服帐号全局状态
+     */
+    static class OpenKfidState {
+        volatile String token;
+        volatile String globalCursor;
+        final ConcurrentHashMap<String, UserState> userStates = new ConcurrentHashMap<>();
+    }
+
+    /**
+     * 单个用户的消息队列状态
+     */
+    static class UserState {
+        volatile String lastProcessedMsgId;
         final List<SyncMsgResponse.MsgItem> bufferedMessages = new CopyOnWriteArrayList<>();
         ScheduledFuture<?> scheduledTask;
     }
@@ -70,135 +77,164 @@ public class MessageAggregatorService {
     }
 
     /**
-     * 入口方法 — MessageService 调用此方法
+     * 入口方法 — MessageService 调用
      *
-     * <p>流程：</p>
-     * <ol>
-     *   <li>sync_msg 拉取消息</li>
-     *   <li>过滤出未处理的用户消息</li>
-     *   <li>加入缓冲区</li>
-     *   <li>取消旧定时器，调度新的 3 秒定时器</li>
-     * </ol>
-     *
-     * @param token    回调 token（用于 sync_msg）
+     * @param token    回调 token
      * @param openKfid 客服帐号 ID
      */
     public void onCallback(String token, String openKfid) {
-        System.out.println("\n========== [MessageAggregator] onCallback ==========");
+        System.out.println("\n========== [Aggregator] onCallback ==========");
         System.out.println("  openKfid: " + openKfid);
 
-        // 拉取消息
-        List<SyncMsgResponse.MsgItem> allMessages = fetchAllMessages(token, openKfid);
-        if (allMessages.isEmpty()) {
-            System.out.println("  无消息，跳过");
-            return;
-        }
+        // 获取或创建 openKfid 全局状态
+        OpenKfidState state = openKfidStates.computeIfAbsent(openKfid, k -> new OpenKfidState());
+        state.token = token;
 
-        // 取第一条用户消息获取 externalUserid
-        String externalUserid = null;
-        for (SyncMsgResponse.MsgItem msg : allMessages) {
-            if (msg.getOrigin() != null && msg.getOrigin() == 3 && msg.getExternal_userid() != null) {
-                externalUserid = msg.getExternal_userid();
-                break;
-            }
-        }
-        if (externalUserid == null) {
-            System.out.println("  未找到用户消息，跳过");
-            return;
-        }
+        // 增量拉取消息（使用全局 cursor）
+        List<SyncMsgResponse.MsgItem> allNewMessages = fetchIncrementalMessages(token, openKfid, state.globalCursor);
+        System.out.println("  增量拉取: " + allNewMessages.size() + " 条消息");
 
-        // final 引用供 lambda 使用
-        final String userId = externalUserid;
-
-        // 过滤出未处理的用户消息
-        List<SyncMsgResponse.MsgItem> newMessages = messageTracker.filterNewMessages(userId, allMessages);
-        System.out.println("  新消息数: " + newMessages.size());
-
-        if (newMessages.isEmpty()) {
+        if (allNewMessages.isEmpty()) {
             System.out.println("  无新消息，跳过");
             return;
         }
 
-        // 获取或创建 PendingConversation
-        PendingConversation conv = pending.compute(userId, (key, existing) -> {
-            if (existing == null) {
-                existing = new PendingConversation();
-                existing.openKfid = openKfid;
-                existing.externalUserid = userId;
-            }
-            // 始终更新 token 为最新的
-            existing.token = token;
-            return existing;
-        });
+        // 按 external_userid 分组（只保留用户消息 origin=3）
+        Map<String, List<SyncMsgResponse.MsgItem>> grouped = groupByUser(allNewMessages);
+        System.out.println("  涉及用户数: " + grouped.size());
 
-        // 将新消息加入缓冲区（避免重复添加）
-        for (SyncMsgResponse.MsgItem msg : newMessages) {
-            boolean exists = conv.bufferedMessages.stream()
-                    .anyMatch(m -> m.getMsgid().equals(msg.getMsgid()));
-            if (!exists) {
-                conv.bufferedMessages.add(msg);
-            }
+        // 每个用户独立处理
+        for (var entry : grouped.entrySet()) {
+            String userId = entry.getKey();
+            List<SyncMsgResponse.MsgItem> userMessages = entry.getValue();
+            processPerUserMessages(state, userId, userMessages, openKfid);
         }
 
-        System.out.println("  缓冲区消息数: " + conv.bufferedMessages.size());
-
-        // 取消旧定时器，调度新的（防抖）
-        if (conv.scheduledTask != null && !conv.scheduledTask.isDone()) {
-            conv.scheduledTask.cancel(false);
-            System.out.println("  已取消旧定时器，重新调度");
-        }
-
-        conv.scheduledTask = scheduler.schedule(
-                () -> processAggregatedMessages(userId),
-                DEBOUNCE_MS, TimeUnit.MILLISECONDS
-        );
-        System.out.println("  已调度 " + DEBOUNCE_MS + "ms 后处理");
-        System.out.println("=====================================================");
+        System.out.println("=============================================");
     }
 
     /**
-     * 拉取所有消息（分页）
+     * 增量拉取消息
+     *
+     * <p>使用全局 cursor 从上次拉取位置继续，分页获取所有新消息后更新 cursor。</p>
      */
-    private List<SyncMsgResponse.MsgItem> fetchAllMessages(String token, String openKfid) {
+    private List<SyncMsgResponse.MsgItem> fetchIncrementalMessages(String token, String openKfid, String cursor) {
         List<SyncMsgResponse.MsgItem> allMessages = new ArrayList<>();
-        String cursor = null;
+        String currentCursor = cursor;
 
         do {
-            SyncMsgResponse syncResult = wecomApiClient.syncMsg(token, openKfid, cursor, 1000);
+            SyncMsgResponse syncResult = wecomApiClient.syncMsg(token, openKfid, currentCursor, 1000);
             if (syncResult.getMsg_list() != null) {
                 allMessages.addAll(syncResult.getMsg_list());
             }
             if (syncResult.getHas_more() != null && syncResult.getHas_more() == 1) {
-                cursor = syncResult.getNext_cursor();
+                currentCursor = syncResult.getNext_cursor();
             } else {
                 break;
             }
-        } while (cursor != null && !cursor.isEmpty());
+        } while (currentCursor != null && !currentCursor.isEmpty());
+
+        // 更新全局 cursor
+        if (currentCursor != null && !currentCursor.isEmpty()) {
+            openKfidStates.get(openKfid).globalCursor = currentCursor;
+        }
 
         return allMessages;
     }
 
     /**
-     * 定时器触发 — 处理聚合消息
+     * 按 external_userid 分组，只保留用户消息（origin=3）
      */
-    private void processAggregatedMessages(String externalUserid) {
-        PendingConversation conv = pending.remove(externalUserid);
-        if (conv == null || conv.bufferedMessages.isEmpty()) {
+    private Map<String, List<SyncMsgResponse.MsgItem>> groupByUser(List<SyncMsgResponse.MsgItem> messages) {
+        return messages.stream()
+                .filter(m -> m.getOrigin() != null && m.getOrigin() == WecomConstants.MsgOrigin.WECHAT_USER)
+                .filter(m -> m.getExternal_userid() != null)
+                .collect(java.util.stream.Collectors.groupingBy(SyncMsgResponse.MsgItem::getExternal_userid));
+    }
+
+    /**
+     * 处理单个用户的消息
+     *
+     * <p>按 lastMsgId 过滤增量 → 加入缓冲区 → 防抖调度</p>
+     */
+    private void processPerUserMessages(OpenKfidState state, String userId,
+                                        List<SyncMsgResponse.MsgItem> messages, String openKfid) {
+        // 获取或创建用户状态
+        UserState userState = state.userStates.computeIfAbsent(userId, k -> new UserState());
+
+        // 按 lastMsgId 过滤增量消息
+        List<SyncMsgResponse.MsgItem> incremental = filterByLastMsgId(messages, userState.lastProcessedMsgId);
+        System.out.println("  用户 " + userId + ": 增量消息 " + incremental.size() + " 条");
+
+        if (incremental.isEmpty()) {
             return;
         }
 
-        List<SyncMsgResponse.MsgItem> messages = new ArrayList<>(conv.bufferedMessages);
-        String openKfid = conv.openKfid;
+        // 加入缓冲区（去重）
+        for (SyncMsgResponse.MsgItem msg : incremental) {
+            boolean exists = userState.bufferedMessages.stream()
+                    .anyMatch(m -> m.getMsgid().equals(msg.getMsgid()));
+            if (!exists) {
+                userState.bufferedMessages.add(msg);
+            }
+        }
 
-        System.out.println("\n========== [MessageAggregator] 处理聚合消息 ==========");
-        System.out.println("  externalUserid: " + externalUserid);
+        System.out.println("  用户 " + userId + ": 缓冲区 " + userState.bufferedMessages.size() + " 条");
+
+        // 取消旧定时器，重新调度（防抖）
+        if (userState.scheduledTask != null && !userState.scheduledTask.isDone()) {
+            userState.scheduledTask.cancel(false);
+        }
+
+        final String uid = userId;
+        final String okfid = openKfid;
+        userState.scheduledTask = scheduler.schedule(
+                () -> processUserAggregatedMessages(state, uid, okfid),
+                DEBOUNCE_MS, TimeUnit.MILLISECONDS
+        );
+        System.out.println("  用户 " + userId + ": 已调度 " + DEBOUNCE_MS + "ms 后处理");
+    }
+
+    /**
+     * 按 lastMsgId 过滤出增量消息（msgid > lastMsgId）
+     */
+    private List<SyncMsgResponse.MsgItem> filterByLastMsgId(List<SyncMsgResponse.MsgItem> messages, String lastMsgId) {
+        if (lastMsgId == null || lastMsgId.isEmpty()) {
+            return new ArrayList<>(messages);
+        }
+        return messages.stream()
+                .filter(m -> m.getMsgid() != null && m.getMsgid().compareTo(lastMsgId) > 0)
+                .toList();
+    }
+
+    /**
+     * 防抖定时器触发 — 处理单个用户的聚合消息
+     */
+    private void processUserAggregatedMessages(OpenKfidState state, String userId, String openKfid) {
+        UserState userState = state.userStates.get(userId);
+        if (userState == null || userState.bufferedMessages.isEmpty()) {
+            return;
+        }
+
+        List<SyncMsgResponse.MsgItem> messages = new ArrayList<>(userState.bufferedMessages);
+        userState.bufferedMessages.clear();
+
+        System.out.println("\n========== [Aggregator] 处理用户消息 ==========");
+        System.out.println("  用户: " + userId);
         System.out.println("  消息数: " + messages.size());
 
         try {
             // 会话状态管理
-            ensureBotService(openKfid, externalUserid);
+            ensureBotService(openKfid, userId);
 
-            // 按类型分组
+            // 记录本次最大 msgid
+            String maxMsgId = messages.stream()
+                    .map(SyncMsgResponse.MsgItem::getMsgid)
+                    .filter(id -> id != null)
+                    .max(String::compareTo)
+                    .orElse(null);
+
+            // 按类型分组处理
             List<SyncMsgResponse.MsgItem> images = filterByType(messages, "image");
             List<SyncMsgResponse.MsgItem> texts = filterByType(messages, "text");
             List<SyncMsgResponse.MsgItem> voices = filterByType(messages, "voice");
@@ -206,185 +242,122 @@ public class MessageAggregatorService {
             Reply reply;
 
             if (!images.isEmpty() && !texts.isEmpty()) {
-                // 图片 + 文字 → 上传图片，文字作为 query
-                reply = handleImageWithText(images, texts, externalUserid, openKfid);
+                reply = handleImageWithText(images, texts, userId);
             } else if (!images.isEmpty()) {
-                // 只有图片 → 上传图片，默认 query
-                reply = handleImageOnly(images, externalUserid, openKfid);
+                reply = handleImageOnly(images, userId);
             } else if (!texts.isEmpty()) {
-                // 只有文字 → 拼接为 query
-                reply = handleTextOnly(texts, externalUserid, openKfid);
+                reply = handleTextOnly(texts, userId);
             } else if (!voices.isEmpty()) {
-                // 只有语音 → 上传语音，默认 query
-                reply = handleVoiceOnly(voices, externalUserid, openKfid);
+                reply = handleVoiceOnly(voices, userId);
             } else {
-                // 不支持的类型
-                reply = handleUnsupported(messages, openKfid);
+                reply = handleUnsupported(messages);
             }
 
             // 发送回复
             if (reply != null) {
-                SendMsgResponse sendResult = wecomApiClient.sendMsg(externalUserid, openKfid, reply.msgtype(), reply.content());
+                SendMsgResponse sendResult = wecomApiClient.sendMsg(userId, openKfid, reply.msgtype(), reply.content());
                 System.out.println("  发送结果: " + sendResult.getErrcode() + " - " + sendResult.getErrmsg());
             }
 
-            // 标记所有消息为已处理
+            // 更新 lastMsgId，标记已处理
+            if (maxMsgId != null) {
+                userState.lastProcessedMsgId = maxMsgId;
+            }
             List<String> msgIds = messages.stream().map(SyncMsgResponse.MsgItem::getMsgid).toList();
-            messageTracker.markAllProcessed(externalUserid, msgIds);
-            System.out.println("  已标记 " + msgIds.size() + " 条消息为已处理");
+            messageTracker.markAllProcessed(userId, msgIds);
+            System.out.println("  已标记 " + msgIds.size() + " 条，lastMsgId=" + maxMsgId);
 
         } catch (Exception e) {
-            System.err.println("  处理聚合消息异常: " + e.getMessage());
+            System.err.println("  处理用户消息异常: " + e.getMessage());
             e.printStackTrace(System.err);
         }
 
-        System.out.println("========================================================\n");
+        System.out.println("================================================\n");
     }
 
-    /**
-     * 图片 + 文字 → 上传图片到 Dify，文字作为 query，附带图片文件 ID
-     */
+    // ==================== 消息处理 ====================
+
     private Reply handleImageWithText(List<SyncMsgResponse.MsgItem> images,
-                                      List<SyncMsgResponse.MsgItem> texts,
-                                      String externalUserid, String openKfid) {
+                                      List<SyncMsgResponse.MsgItem> texts, String userId) {
         System.out.println("  模式: 图片+文字");
-
-        // 上传所有图片到 Dify
-        List<String> fileIds = uploadImages(images, externalUserid);
-        System.out.println("  上传成功图片数: " + fileIds.size());
-
-        // 拼接所有文字为 query
+        List<String> fileIds = uploadImages(images, userId);
         String query = combineTexts(texts);
-        System.out.println("  合并 query: " + query);
+        System.out.println("  query: " + query);
 
-        // 调用 Dify
-        String conversationId = difyConversationService.getConversationId(externalUserid);
-        DifyChatResponse difyResponse = difyApiClient.chatMessage(query, externalUserid, conversationId,
-                fileIds.isEmpty() ? null : fileIds);
-        cacheConversationId(externalUserid, difyResponse.getConversationId());
-
-        return Reply.text(difyResponse.getAnswer());
+        String convId = difyConversationService.getConversationId(userId);
+        DifyChatResponse resp = difyApiClient.chatMessage(query, userId, convId, fileIds.isEmpty() ? null : fileIds);
+        cacheConversationId(userId, resp.getConversationId());
+        return Reply.text(resp.getAnswer());
     }
 
-    /**
-     * 只有图片 → 上传图片，默认 query
-     */
-    private Reply handleImageOnly(List<SyncMsgResponse.MsgItem> images,
-                                  String externalUserid, String openKfid) {
+    private Reply handleImageOnly(List<SyncMsgResponse.MsgItem> images, String userId) {
         System.out.println("  模式: 仅图片");
+        List<String> fileIds = uploadImages(images, userId);
 
-        List<String> fileIds = uploadImages(images, externalUserid);
-        System.out.println("  上传成功图片数: " + fileIds.size());
-
-        String prompt = "请分析图片内容";
-
-        String conversationId = difyConversationService.getConversationId(externalUserid);
-        DifyChatResponse difyResponse = difyApiClient.chatMessage(prompt, externalUserid, conversationId,
-                fileIds.isEmpty() ? null : fileIds);
-        cacheConversationId(externalUserid, difyResponse.getConversationId());
-
-        return Reply.text(difyResponse.getAnswer());
+        String convId = difyConversationService.getConversationId(userId);
+        DifyChatResponse resp = difyApiClient.chatMessage("请分析图片内容", userId, convId, fileIds.isEmpty() ? null : fileIds);
+        cacheConversationId(userId, resp.getConversationId());
+        return Reply.text(resp.getAnswer());
     }
 
-    /**
-     * 只有文字 → 拼接为 query
-     */
-    private Reply handleTextOnly(List<SyncMsgResponse.MsgItem> texts,
-                                 String externalUserid, String openKfid) {
+    private Reply handleTextOnly(List<SyncMsgResponse.MsgItem> texts, String userId) {
         System.out.println("  模式: 仅文字");
-
         String query = combineTexts(texts);
-        System.out.println("  合并 query: " + query);
+        System.out.println("  query: " + query);
 
-        String conversationId = difyConversationService.getConversationId(externalUserid);
-        DifyChatResponse difyResponse = difyApiClient.chatMessage(query, externalUserid, conversationId, null);
-        cacheConversationId(externalUserid, difyResponse.getConversationId());
-
-        return Reply.text(difyResponse.getAnswer());
+        String convId = difyConversationService.getConversationId(userId);
+        DifyChatResponse resp = difyApiClient.chatMessage(query, userId, convId, null);
+        cacheConversationId(userId, resp.getConversationId());
+        return Reply.text(resp.getAnswer());
     }
 
-    /**
-     * 只有语音 → 上传语音，默认 query
-     */
-    private Reply handleVoiceOnly(List<SyncMsgResponse.MsgItem> voices,
-                                  String externalUserid, String openKfid) {
+    private Reply handleVoiceOnly(List<SyncMsgResponse.MsgItem> voices, String userId) {
         System.out.println("  模式: 仅语音");
+        List<String> fileIds = uploadVoices(voices, userId);
 
-        List<String> fileIds = uploadVoices(voices, externalUserid);
-        System.out.println("  上传成功语音数: " + fileIds.size());
-
-        String prompt = "请分析语音内容";
-
-        String conversationId = difyConversationService.getConversationId(externalUserid);
-        DifyChatResponse difyResponse = difyApiClient.chatMessage(prompt, externalUserid, conversationId,
-                fileIds.isEmpty() ? null : fileIds);
-        cacheConversationId(externalUserid, difyResponse.getConversationId());
-
-        return Reply.text(difyResponse.getAnswer());
+        String convId = difyConversationService.getConversationId(userId);
+        DifyChatResponse resp = difyApiClient.chatMessage("请分析语音内容", userId, convId, fileIds.isEmpty() ? null : fileIds);
+        cacheConversationId(userId, resp.getConversationId());
+        return Reply.text(resp.getAnswer());
     }
 
-    /**
-     * 不支持的消息类型 → 兜底回复
-     */
-    private Reply handleUnsupported(List<SyncMsgResponse.MsgItem> messages, String openKfid) {
+    private Reply handleUnsupported(List<SyncMsgResponse.MsgItem> messages) {
         String firstType = messages.get(0).getMsgtype();
-        System.out.println("  模式: 不支持的类型 " + firstType);
-
         return Reply.text("抱歉，我暂时无法处理 " + firstType + " 类型的消息，请发送文字描述。");
     }
 
     // ==================== 工具方法 ====================
 
-    /**
-     * 上传图片列表到 Dify，返回成功上传的文件 ID 列表
-     */
-    private List<String> uploadImages(List<SyncMsgResponse.MsgItem> images, String externalUserid) {
+    private List<String> uploadImages(List<SyncMsgResponse.MsgItem> images, String userId) {
         List<String> fileIds = new ArrayList<>();
         for (int i = 0; i < images.size(); i++) {
-            SyncMsgResponse.MsgItem img = images.get(i);
-            String mediaId = img.getImage().getMedia_id();
+            String mediaId = images.get(i).getImage().getMedia_id();
             byte[] bytes = wecomApiClient.downloadMedia(mediaId);
             if (bytes != null) {
-                String fileId = difyApiClient.uploadFile(bytes, "wecom_image_" + (i + 1) + ".jpg", "image/jpeg", externalUserid);
-                if (fileId != null) {
-                    fileIds.add(fileId);
-                }
+                String fileId = difyApiClient.uploadFile(bytes, "wecom_image_" + (i + 1) + ".jpg", "image/jpeg", userId);
+                if (fileId != null) fileIds.add(fileId);
             }
         }
         return fileIds;
     }
 
-    /**
-     * 上传语音列表到 Dify，返回成功上传的文件 ID 列表
-     */
-    private List<String> uploadVoices(List<SyncMsgResponse.MsgItem> voices, String externalUserid) {
+    private List<String> uploadVoices(List<SyncMsgResponse.MsgItem> voices, String userId) {
         List<String> fileIds = new ArrayList<>();
         for (int i = 0; i < voices.size(); i++) {
-            SyncMsgResponse.MsgItem voice = voices.get(i);
-            String mediaId = voice.getVoice().getMedia_id();
+            String mediaId = voices.get(i).getVoice().getMedia_id();
             byte[] bytes = wecomApiClient.downloadMedia(mediaId);
             if (bytes != null) {
-                String fileId = difyApiClient.uploadFile(bytes, "wecom_voice_" + (i + 1) + ".amr", "audio/amr", externalUserid);
-                if (fileId != null) {
-                    fileIds.add(fileId);
-                }
+                String fileId = difyApiClient.uploadFile(bytes, "wecom_voice_" + (i + 1) + ".amr", "audio/amr", userId);
+                if (fileId != null) fileIds.add(fileId);
             }
         }
         return fileIds;
     }
 
-    /**
-     * 按消息类型过滤
-     */
     private List<SyncMsgResponse.MsgItem> filterByType(List<SyncMsgResponse.MsgItem> messages, String msgtype) {
-        return messages.stream()
-                .filter(m -> msgtype.equals(m.getMsgtype()))
-                .toList();
+        return messages.stream().filter(m -> msgtype.equals(m.getMsgtype())).toList();
     }
 
-    /**
-     * 拼接多条文字消息为一个 query（按时间顺序，换行分隔）
-     */
     private String combineTexts(List<SyncMsgResponse.MsgItem> texts) {
         return texts.stream()
                 .filter(m -> m.getText() != null && m.getText().getContent() != null)
@@ -393,27 +366,20 @@ public class MessageAggregatorService {
                 .orElse("");
     }
 
-    /**
-     * 确保会话处于智能助手接待状态
-     */
-    private void ensureBotService(String openKfid, String externalUserid) {
+    private void ensureBotService(String openKfid, String userId) {
         try {
-            var sessionState = sessionStateService.getSessionState(openKfid, externalUserid);
+            var sessionState = sessionStateService.getSessionState(openKfid, userId);
             if (sessionState.getService_state() != WecomConstants.ServiceState.BOT_SERVICE) {
-                sessionStateService.transferToBotService(openKfid, externalUserid);
-                System.out.println("  已切换为智能助手接待");
+                sessionStateService.transferToBotService(openKfid, userId);
             }
         } catch (Exception e) {
             System.err.println("  会话状态管理异常: " + e.getMessage());
         }
     }
 
-    /**
-     * 缓存 Dify 会话 ID
-     */
-    private void cacheConversationId(String externalUserid, String conversationId) {
+    private void cacheConversationId(String userId, String conversationId) {
         if (conversationId != null && !conversationId.isEmpty()) {
-            difyConversationService.saveConversationId(externalUserid, conversationId);
+            difyConversationService.saveConversationId(userId, conversationId);
         }
     }
 }
