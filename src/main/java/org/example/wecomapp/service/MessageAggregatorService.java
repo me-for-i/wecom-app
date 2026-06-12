@@ -276,9 +276,7 @@ public class MessageAggregatorService {
         List<String> fileIds = uploadImages(images, externalUserid);
         System.out.println("  上传成功图片数: " + fileIds.size());
 
-        String prompt = images.size() == 1
-                ? "用户发送了一张图片，请根据图片内容进行回复"
-                : "用户发送了 " + images.size() + " 张图片，请根据图片内容进行回复";
+        String prompt = "请分析图片内容";
 
         String conversationId = difyConversationService.getConversationId(externalUserid);
         DifyChatResponse difyResponse = difyApiClient.chatMessage(prompt, externalUserid, conversationId,
@@ -315,9 +313,7 @@ public class MessageAggregatorService {
         List<String> fileIds = uploadVoices(voices, externalUserid);
         System.out.println("  上传成功语音数: " + fileIds.size());
 
-        String prompt = voices.size() == 1
-                ? "用户发送了一段语音消息，请根据语音内容进行回复"
-                : "用户发送了 " + voices.size() + " 段语音消息，请根据语音内容进行回复";
+        String prompt = "请分析语音内容";
 
         String conversationId = difyConversationService.getConversationId(externalUserid);
         DifyChatResponse difyResponse = difyApiClient.chatMessage(prompt, externalUserid, conversationId,
