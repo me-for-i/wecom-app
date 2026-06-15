@@ -285,6 +285,45 @@ public class WecomApiClient {
     }
 
     /**
+     * 下载企业微信媒体文件
+     *
+     * <p>调用企业微信 media/get 接口，根据 media_id 下载图片、语音等媒体文件</p>
+     *
+     * <p>接口地址：GET https://qyapi.weixin.qq.com/cgi-bin/media/get</p>
+     *
+     * @param mediaId 媒体文件 ID（从消息内容中获取）
+     * @return 媒体文件的二进制字节数组；如果下载失败则返回 null
+     * @see <a href="https://developer.work.weixin.qq.com/document/path/90266">获取临时素材接口文档</a>
+     */
+    public byte[] downloadMedia(String mediaId) {
+        System.out.println("\n========== [企业微信 API] media/get ==========");
+        System.out.println("  media_id: " + mediaId);
+
+        try {
+            String accessToken = accessTokenService.getAccessToken();
+            byte[] responseBytes = restClient.get()
+                    .uri(properties.getDownloadMediaUrl() + "?access_token=" + accessToken + "&media_id=" + mediaId)
+                    .retrieve()
+                    .body(byte[].class);
+
+            // 检查是否是 JSON 错误响应（企业微信在出错时返回 JSON）
+            String responseStr = new String(responseBytes, java.nio.charset.StandardCharsets.UTF_8);
+            if (responseStr.trim().startsWith("{")) {
+                JSONObject errorJson = new JSONObject(responseStr);
+                System.out.println("  下载失败: errcode=" + errorJson.optInt("errcode") + ", errmsg=" + errorJson.optString("errmsg"));
+                return null;
+            }
+
+            System.out.println("  下载成功，大小: " + responseBytes.length + " 字节");
+            return responseBytes;
+        } catch (Exception e) {
+            System.err.println("  下载媒体文件异常: " + e.getMessage());
+            e.printStackTrace(System.err);
+            return null;
+        }
+    }
+
+    /**
      * 变更会话状态
      *
      * <p>调用企业微信 service_state/trans 接口，变更会话的当前状态</p>

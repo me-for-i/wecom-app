@@ -3,8 +3,10 @@ package org.example.wecomapp.service;
 import org.example.wecomapp.config.WecomProperties;
 import org.json.JSONObject;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
+import java.net.URI;
 import java.time.Instant;
 
 /**
@@ -91,28 +93,54 @@ public class AccessTokenService {
                 + "?corpid=" + properties.getCorpId()
                 + "&corpsecret=" + properties.getCorpSecret();
 
-        String response = restClient.get()
-                .uri(url)
-                .retrieve()
-                .body(String.class);
+        try {
+            System.out.println("  请求 URL: " + properties.getGetTokenUrl() + "?corpid=***&corpsecret=***");
+            System.out.println("  DNS: " + URI.create(properties.getGetTokenUrl()).getHost());
 
-        JSONObject jsonResponse = new JSONObject(response);
+            String response = restClient.get()
+                    .uri(url)
+                    .retrieve()
+                    .body(String.class);
 
-        int errcode = jsonResponse.optInt("errcode", 0);
-        if (errcode != 0) {
-            String errmsg = jsonResponse.optString("errmsg", "Unknown error");
-            System.err.println("  [失败] errcode: " + errcode + ", errmsg: " + errmsg);
-            throw new RuntimeException("Failed to get access_token: " + errmsg + " (errcode: " + errcode + ")");
+            JSONObject jsonResponse = new JSONObject(response);
+
+            int errcode = jsonResponse.optInt("errcode", 0);
+            if (errcode != 0) {
+                String errmsg = jsonResponse.optString("errmsg", "Unknown error");
+                System.err.println("  [失败] errcode: " + errcode + ", errmsg: " + errmsg);
+                throw new RuntimeException("Failed to get access_token: " + errmsg + " (errcode: " + errcode + ")");
+            }
+
+            cachedAccessToken = jsonResponse.getString("access_token");
+            int expiresIn = jsonResponse.getInt("expires_in");
+
+            // 提前 5 分钟过期，避免边界情况
+            expireTime = Instant.now().plusSeconds(expiresIn - 300);
+
+            System.out.println("  [成功] expires_in: " + expiresIn + "s");
+            return cachedAccessToken;
+
+        } catch (ResourceAccessException e) {
+            // 网络连接失败（DNS / 超时 / SSL 等）
+            Throwable rootCause = e.getRootCause();
+            System.err.println("========== [网络错误] 无法连接到企业微信 API ==========");
+            System.err.println("  URL: " + properties.getGetTokenUrl());
+            System.err.println("  异常类型: " + (rootCause != null ? rootCause.getClass().getName() : e.getClass().getName()));
+            System.err.println("  错误信息: " + (rootCause != null ? rootCause.getMessage() : e.getMessage()));
+            System.err.println("");
+            System.err.println("  可能的原因：");
+            System.err.println("    1. 网络不通 - 无法连接到 qyapi.weixin.qq.com");
+            System.err.println("    2. DNS 解析失败");
+            System.err.println("    3. HTTPS/SSL 证书问题");
+            System.err.println("    4. 需要配置 HTTP 代理");
+            System.err.println("");
+            System.err.println("  解决方式：");
+            System.err.println("    方式 A - 使用 JVM 系统属性配置代理：");
+            System.err.println("      -Dhttps.proxyHost=your-proxy-host -Dhttps.proxyPort=3128");
+            System.err.println("    方式 B - 或者直接运行 curl 测试连通性：");
+            System.err.println("      curl -v '" + properties.getGetTokenUrl() + "?corpid=" + properties.getCorpId() + "&corpsecret=" + properties.getCorpSecret() + "'");
+            System.err.println("================================================");
+            throw new RuntimeException("无法连接到企业微信 API，请检查网络和代理配置", e);
         }
-
-        cachedAccessToken = jsonResponse.getString("access_token");
-        int expiresIn = jsonResponse.getInt("expires_in");
-
-        // 提前 5 分钟过期，避免边界情况
-        expireTime = Instant.now().plusSeconds(expiresIn - 300);
-
-        System.out.println("  [成功] expires_in: " + expiresIn + "s, token: " + cachedAccessToken.substring(0, 10) + "...");
-
-        return cachedAccessToken;
     }
 }

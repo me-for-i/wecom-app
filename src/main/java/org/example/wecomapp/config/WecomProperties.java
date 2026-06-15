@@ -17,8 +17,17 @@ public class WecomProperties {
     private String sendMsgUrl;
     private String getSessionStateUrl;
     private String transSessionStateUrl;
+    private String downloadMediaUrl;
     private String difyApiKey;
     private String difyApiServer;
+
+    public String getDownloadMediaUrl() {
+        return downloadMediaUrl;
+    }
+
+    public void setDownloadMediaUrl(String downloadMediaUrl) {
+        this.downloadMediaUrl = downloadMediaUrl;
+    }
 
     public String getToken() {
         return token;
