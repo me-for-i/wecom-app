@@ -30,7 +30,7 @@ public class WecomConfig {
     /**
      * 读取超时时间（毫秒）
      */
-    private static final int READ_TIMEOUT = 30_000;
+    private static final int READ_TIMEOUT = 120_000;
 
     @Bean
     public WXBizJsonMsgCrypt wxbizJsonMsgCrypt(WecomProperties properties) throws AesException {
@@ -52,7 +52,7 @@ public class WecomConfig {
                 .setMaxConnTotal(20)           // 最大总连接数
                 .setMaxConnPerRoute(10)        // 每个目标主机最大连接数
                 .setDefaultSocketConfig(SocketConfig.custom()
-                        .setSoTimeout(Timeout.ofSeconds(30))
+                        .setSoTimeout(Timeout.ofSeconds(120))
                         .build())
                 .setSSLSocketFactory(SSLConnectionSocketFactoryBuilder.create()
                         .setSslContext(sslContext)
