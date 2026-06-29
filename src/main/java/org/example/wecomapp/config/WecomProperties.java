@@ -20,6 +20,7 @@ public class WecomProperties {
     private String downloadMediaUrl;
     private String difyApiKey;
     private String difyApiServer;
+    private String getCustomerUrl;
 
     public String getDownloadMediaUrl() {
         return downloadMediaUrl;
@@ -123,5 +124,13 @@ public class WecomProperties {
 
     public void setDifyApiServer(String difyApiServer) {
         this.difyApiServer = difyApiServer;
+    }
+
+    public String getGetCustomerUrl() {
+        return getCustomerUrl;
+    }
+
+    public void setGetCustomerUrl(String getCustomerUrl) {
+        this.getCustomerUrl = getCustomerUrl;
     }
 }

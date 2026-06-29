@@ -55,6 +55,9 @@ public class MessageAggregatorService {
     /** 每用户状态：lastMsgId + 防抖定时器 + 缓冲区 */
     private final ConcurrentHashMap<String, UserState> userStates = new ConcurrentHashMap<>();
 
+    /** 用户昵称缓存（external_userid → nickname），避免重复请求 */
+    private final ConcurrentHashMap<String, String> nicknameCache = new ConcurrentHashMap<>();
+
     static class OpenKfidState {
         volatile String token;
         volatile String globalCursor; // 跨回调持久化的全局游标
@@ -351,8 +354,9 @@ public class MessageAggregatorService {
         System.out.println("  文件数: " + fileIds.size());
 
         String convId = difyConversationService.getConversationId(userId);
+        String nickname = getNickname(userId);
         DifyChatResponse resp = difyApiClient.chatMessage(query, userId, convId,
-                fileIds.isEmpty() ? null : fileIds);
+                fileIds.isEmpty() ? null : fileIds, nickname);
         cacheConversationId(userId, resp.getConversationId());
 
         System.out.println("  AI 回答: " + resp.getAnswer());
@@ -414,5 +418,21 @@ public class MessageAggregatorService {
         if (conversationId != null && !conversationId.isEmpty()) {
             difyConversationService.saveConversationId(userId, conversationId);
         }
+    }
+
+    /**
+     * 获取用户昵称（带全局缓存）
+     *
+     * <p>优先从缓存读取，缓存未命中时请求企业微信接口获取并缓存。</p>
+     */
+    private String getNickname(String externalUserid) {
+        return nicknameCache.computeIfAbsent(externalUserid, id -> {
+            try {
+                return wecomApiClient.getCustomerNickname(id);
+            } catch (Exception e) {
+                System.out.println("  获取用户昵称异常: " + e.getMessage());
+                return null;
+            }
+        });
     }
 }

@@ -28,6 +28,7 @@ wecom:
   get-session-state-url: https://qyapi.weixin.qq.com/cgi-bin/kf/service_state/get
   trans-session-state-url: https://qyapi.weixin.qq.com/cgi-bin/kf/service_state/trans
   download-media-url: https://qyapi.weixin.qq.com/cgi-bin/media/get
+  get-customer-url: https://qyapi.weixin.qq.com/cgi-bin/kf/customer/batchget
   dify-api-key: app-qLfq3JWMvzw8sAq0EmwgxtV7
 #  dify-api-key: app-dQH3FdCXRXJ1fg8fTJwABnPP
   dify-api-server: https://api.dify.ai/v1

@@ -364,4 +364,48 @@ public class WecomApiClient {
 
         return result;
     }
+
+    /**
+     * 获取客户基础信息
+     *
+     * <p>调用企业微信 kf/customer/batchget 接口，获取外部客户的基础信息（昵称、头像等）</p>
+     *
+     * <p>接口地址：POST https://qyapi.weixin.qq.com/cgi-bin/kf/customer/batchget</p>
+     *
+     * @param externalUserid 外部客户 ID
+     * @return 客户昵称，获取失败时返回 null
+     */
+    public String getCustomerNickname(String externalUserid) {
+        System.out.println("\n========== [企业微信 API] customer/batchget ==========");
+        System.out.println("  external_userid: " + externalUserid);
+
+        JSONObject body = new JSONObject();
+        body.put("external_userid_list", new org.json.JSONArray().put(externalUserid));
+        body.put("need_enter_session_context", 0);
+
+        String accessToken = accessTokenService.getAccessToken();
+        String response = restClient.post()
+                .uri(properties.getGetCustomerUrl() + "?access_token=" + accessToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body.toString())
+                .retrieve()
+                .body(String.class);
+
+        JSONObject json = new JSONObject(response);
+        int errcode = json.optInt("errcode", -1);
+        if (errcode != 0) {
+            System.out.println("  获取客户信息失败: errcode=" + errcode + ", errmsg=" + json.optString("errmsg"));
+            return null;
+        }
+
+        var customerList = json.optJSONArray("customer_list");
+        if (customerList == null || customerList.isEmpty()) {
+            System.out.println("  客户列表为空");
+            return null;
+        }
+
+        String nickname = customerList.getJSONObject(0).optString("nickname", "");
+        System.out.println("  nickname: " + nickname);
+        return nickname.isEmpty() ? null : nickname;
+    }
 }

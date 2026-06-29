@@ -53,9 +53,10 @@ public class DifyApiClient {
      * @param user           用户标识（external_userid）
      * @param conversationId 会话ID，传入时基于之前的聊天记录继续对话，为空时开启新会话
      * @param fileIds        已上传到 Dify 的文件 ID 列表（图片、音频等），可为 null
+     * @param nickname       用户昵称，传入 inputs 字段供 Dify 变量引用，可为 null
      * @return Dify 返回的 AI 回答
      */
-    public DifyChatResponse chatMessage(String query, String user, String conversationId, List<String> fileIds) {
+    public DifyChatResponse chatMessage(String query, String user, String conversationId, List<String> fileIds, String nickname) {
         System.out.println("\n========== [Dify API] chat-messages ==========");
         System.out.println("  query: " + query);
         System.out.println("  user: " + user);
@@ -65,7 +66,11 @@ public class DifyApiClient {
         body.put("query", query);
         body.put("user", user);
         body.put("response_mode", "streaming");
-        body.put("inputs", new HashMap<>());
+        HashMap<String, Object> inputs = new HashMap<>();
+        if (nickname != null && !nickname.isEmpty()) {
+            inputs.put("nickname", nickname);
+        }
+        body.put("inputs", inputs);
 
         // 携带 conversation_id 以继续之前的对话
         if (conversationId != null && !conversationId.isEmpty()) {
