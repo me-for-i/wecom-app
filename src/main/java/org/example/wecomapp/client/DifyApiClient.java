@@ -12,6 +12,8 @@ import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestClient;
 
+import java.io.BufferedReader;
+import java.io.StringReader;
 import java.util.HashMap;
 import java.util.List;
 
@@ -62,7 +64,7 @@ public class DifyApiClient {
         JSONObject body = new JSONObject();
         body.put("query", query);
         body.put("user", user);
-        body.put("response_mode", "blocking");
+        body.put("response_mode", "streaming");
         body.put("inputs", new HashMap<>());
 
         // 携带 conversation_id 以继续之前的对话
@@ -85,7 +87,7 @@ public class DifyApiClient {
         }
 
         String url = properties.getDifyApiServer() + "/chat-messages";
-        String response = restClient.post()
+        String sseBody = restClient.post()
                 .uri(url)
                 .header("Authorization", "Bearer " + properties.getDifyApiKey())
                 .contentType(MediaType.APPLICATION_JSON)
@@ -93,21 +95,46 @@ public class DifyApiClient {
                 .retrieve()
                 .body(String.class);
 
-        System.out.println("---------- Dify 响应 ----------");
-        System.out.println("  body: " + response);
+        System.out.println("---------- Dify 响应 (streaming) ----------");
 
-        JSONObject json = new JSONObject(response);
+        // 解析 SSE 事件流：拼接所有 message/agent_message 的 answer，从 message_end 取元数据
+        StringBuilder answerBuilder = new StringBuilder();
+        String messageId = "";
+        String respConversationId = "";
+        long createdAt = 0;
+
+        try (BufferedReader reader = new BufferedReader(new StringReader(sseBody))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.startsWith("data: ")) continue;
+                String data = line.substring(6).trim();
+                if (data.isEmpty()) continue;
+
+                JSONObject event = new JSONObject(data);
+                String eventType = event.optString("event", "");
+
+                if ("message".equals(eventType) || "agent_message".equals(eventType)) {
+                    answerBuilder.append(event.optString("answer", ""));
+                }
+                if ("message_end".equals(eventType)) {
+                    messageId = event.optString("message_id", "");
+                    respConversationId = event.optString("conversation_id", "");
+                    createdAt = event.optLong("created_at", 0);
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("  解析 SSE 流异常: " + e.getMessage());
+        }
+
         DifyChatResponse result = new DifyChatResponse();
-        result.setMessageId(json.optString("message_id", ""));
-        result.setConversationId(json.optString("conversation_id", ""));
+        result.setMessageId(messageId);
+        result.setConversationId(respConversationId);
 
-        // 提取 answer 并过滤掉 <think>...</think> 部分，去除结尾多余的 /
-        String answer = json.optString("answer", "");
+        String answer = answerBuilder.toString();
         answer = removeThinkTags(answer);
         answer = removeTrailingSlashes(answer);
         result.setAnswer(answer);
-
-        result.setCreatedAt(json.optLong("created_at", 0));
+        result.setCreatedAt(createdAt);
 
         System.out.println("  message_id: " + result.getMessageId());
         System.out.println("  conversation_id: " + result.getConversationId());
